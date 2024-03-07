@@ -1,0 +1,1189 @@
+_code segment
+assume  cs:_code, ds:_data, ss:_stack, es:_extra
+
+start:
+	; Initialize data segments
+	mov	ax,_data
+	mov	ds,ax
+	mov	ax,_stack
+	mov	ss,ax
+    ; Load command line arguments
+    lea     di, filename           	; Address of the buffer's beginning for input parameter from command line
+    lea     si, default_params		; Address of the buffer holding default parameters
+    call    Get_cmd_params
+
+    ; Open the file with the specified name
+    lea     dx, filename             ; Address of the string containing the file name
+    lea     di, filehandle           ; Variable to store the file handle
+    call    Open_file
+
+	; Read the music file header
+	lea     si, song_name            ; SI points to the buffer where the song name will be stored
+	lea     di, default_params       ; DI points to the variable holding default playback parameters
+	mov     bx, filehandle           ; BX holds the file handle for reading
+	call    Read_header
+
+main_loop:
+; Check if the last note has been read
+	test    last_note, 0FFh
+	jnz     EO_file
+	
+	; Odczytaj nutę z pliku
+	lea     di, note_d_p_o_h_d
+	lea     si, default_params
+	mov     bx, filehandle            ; BX holds the file handle for reading
+	lea     bp, last_note
+	call    Read_note
+	
+	; Check if it's the end of the song
+	test    note_d_p_o_h_d[2], 0FFh
+	jz      main_loop
+	
+		; Check for modifiers
+	lea     si, default_params
+	lea     di, octave_modifier
+	lea     bx, was_modified_o_b
+	call    Chk_for_modifiers
+	
+
+
+	; Set or update the timer
+	mov     timer, 60000              ; If timer is 60000, schedule a new note, otherwise update the timer
+	lea     di, timer
+	lea     si, default_params
+	lea     bx, note_d_p_o_h_d
+	lea     dx, last_beat
+	lea     cx, was_modified_o_b
+	call    Program_timer
+	
+	; Play the note
+	lea     si, note_d_p_o_h_d
+	mov     is_it_time, 1
+	
+	; Play the note again, considering modifiers
+	lea     si, note_d_p_o_h_d
+    lea     di, octave_modifier
+    lea     bx, was_modified_o_b
+	call    play_note
+
+note_loop:
+		; Check if it's time to play the note
+	test    is_it_time, 0FFh
+	jz      do_not_set_time
+	call    set_ms_del
+do_not_set_time:
+	; Check for modifiers
+	lea     si, default_params
+	lea     di, octave_modifier
+	lea     bx, was_modified_o_b
+	call    Chk_for_modifiers
+	
+	; Play the note if the octave wasn't changed
+	test    was_modified_o_b[0], 0FFh
+	jz      octave_no_chg
+
+	
+
+; Play the note after changing the octave
+	lea     si, note_d_p_o_h_d
+    lea     di, octave_modifier
+    lea     bx, was_modified_o_b
+	call    play_note
+octave_no_chg:
+		; Check if the beat was changed
+	test    was_modified_o_b[1], 0FFh
+	jz      beat_no_chg
+	
+	; Update the timer after changing the beat
+	lea     di, timer
+	lea     si, default_params
+	lea     bx, note_d_p_o_h_d
+	lea     dx, last_beat
+	lea     cx, was_modified_o_b
+	call    Program_timer
+	lea     si, default_params
+beat_no_chg:
+	; Check if the specified time in ms has passed
+	lea     di, is_it_time
+	call    chk_if_ms_passed
+	test    is_it_time, 0FFh
+	jz      ms_not_passed
+  ; Decrement the timer (often used for time tracking)
+dec     timer
+ms_not_passed:
+	test    timer, 0FFFFh   ;  Check if the timer hasn't reached zero
+	jnz     note_loop       ; If the timer isn't zero, continue the note loop
+
+	jmp     main_loop       ; If the timer has reached zero, return to the main loop
+
+EO_file:
+    mov     bx, filehandle  ;  File handle to close
+	call    Close_file      ; Call Close_file procedure
+
+EO_file_no_cls:
+	call    turn_off_speaker  ; Turn off the speaker
+
+; Powrót do DOS
+	mov	ah, 4ch       ; INT 21h interrupt - terminate program
+	mov	al, 0
+	int	21h
+
+Close_file proc near
+    push    ax
+    push    bx
+    mov     ax, 03e00h   ; Interrupt for closing a file with the handle in BX
+    int     21h
+    pop     bx
+    pop     ax
+    ret
+Close_file endp
+
+Turn_on_speaker proc near
+    push    ax
+    in      al, 61h       ; Read data from the speaker control port
+    or      al, 3       ; Set the two least significant bits of AL to 11, without altering the other bits
+    out     61h, al     ; Send the modified data to the speaker control port to turn the speaker on
+    pop     ax
+    ret
+Turn_on_speaker endp
+
+Turn_off_speaker proc near
+    push    ax
+    in      al, 61h       ; Read data from the speaker control port
+    and     al, ~3        ; Set the two least significant bits of AL to 00, without altering the other bits
+    out     61h, al      ; Send the modified data to the speaker control port to turn the speaker off
+    pop     ax
+    ret
+Turn_off_speaker endp
+
+Play_note proc near
+    pusha
+    mov     [bx]0, 0  ; Reset the counter for the note
+
+    push    di
+    push    si
+
+    mov     al, [si]2
+    mov     ah, [si]3  ; Load values from memory
+    mov     d_val_to_chk, ax   ; Assign value to d_val_to_chk
+
+    lea     bx, index_of_n
+    lea     si, d_val_to_chk
+    lea     di, vect_no_inx
+    mov     cx, 8
+    call    chk_if_in_rng  ; Check which index the sound has in the note vector
+    pop     si
+
+    push    si
+
+    test    [si]6, 1  ; Read from the same index from the frequency vector
+    jz      use_base_tone
+    lea     si, vect_no_freq_h_oct_0
+    jmp     after_use_base_tone
+    use_base_tone:
+    lea     si, vect_no_freq_oct_0
+    after_use_base_tone:
+    add     si, index_of_n
+    mov     bl, [si]
+    mov     bh, 0
+    pop     si
+
+    mov     cl, [si]4  ; Process the octave modifier
+    pop     di
+    test    [di]1, 10000000b
+    jz      add_cl_1
+    sub     cl, [di]0
+    jmp     after_add_cl_1
+    add_cl_1:
+    add     cl, [di]0
+    after_add_cl_1:
+
+    shl     bx, cl  ; Multiply by 2 for the number of times of the intended octave
+
+    test    bx, 0FFFFh  ; If frequency = 0, turn off the speaker (pause)
+    jnz     turn_on_spk
+    call    turn_off_speaker
+    mov     bx, 33  ; Arbitrary value since speaker is off
+    jmp     after_turn_on_spk
+    turn_on_spk:
+    call    turn_on_speaker
+    after_turn_on_spk:
+    ; Obliczanie częstotliwości w Hz
+    mov     dx, 12h   ; High part of number 1193181 (PIT oscillator frequency)
+    mov     ax, 34ddh  	; Low part
+    div     bx  ; AX = value to be put into PIT channel 2
+
+    pushf  ; Save flags
+    push    ax  ; Save value to be sent
+    cli  ; Disable interrupts
+    mov     al, 0b6h
+    out     43h, al  ; Send command
+
+    pop     ax
+    out     42h, al   ; Send lower byte of counter
+    mov     al, ah
+    out     42h, al   ; Send higher byte of counter
+
+    popf ; Restore flags
+    popa
+    ret
+Play_note endp
+
+Set_ms_del proc near
+        pusha  ; System clock at 0000:046Ch
+        pushf
+        cli  ; Disable interrupts
+        mov     al, 00110000b  ; Program PIT counter on channel 0
+        out     43h, al
+        mov     ax, 1193  ; Value to be written to PIT channel 0 counter
+        out     40h, al  ; Send lower byte to PIT channel 0
+        mov     al, ah
+        out     40h, al   ; Send higher byte to PIT channel 0
+        popf
+        popa
+        ret
+Set_ms_del endp
+
+chk_if_ms_passed proc near
+        pusha
+        pushf
+        cli ; Disable interrupts
+        mov     al, 11100010b    ; Send readback command on PIT channel 3
+        out     43h, al
+        in      al, 40h   ; Read data from PIT channel 0
+        popf
+        test    al, 10000000b   ; Check if the PIT counter output connected to channel 0 is high
+        jz      not_passed   ; If not, a millisecond has not passed
+        mov     [di], 1  ; Set flag
+        popa
+        ret
+not_passed:
+        mov     [di], 0  ; Reset flag
+        popa
+        ret
+chk_if_ms_passed endp
+
+ ; Procedure Program_timer
+; Parameters:
+;   cx - pointer to a structure containing timer and beat values
+;   di - pointer to a variable storing the current timer value
+; Description:
+;   This procedure is responsible for programming the PIT timer based on the current timer value
+;   and the beat value in ms. It can additionally take into account modifiers such as note length and dots.
+Program_timer proc near
+    pusha  ; Preserve registers
+    push    bx
+    mov     bx, cx  ; Save pointer to structure on the stack
+    mov     [bx]1, 0  ; Zero the second byte of the structure (correction)
+    pop     bx
+
+    mov     al, [di]0
+    mov     ah, [di]1 ; Load the current timer value
+
+    cmp     ax, 60000  ; If different from 60000, invert the timer value according to the formula (timer * 4 * note length) / beat
+    je      new_note   ; Jump to program the timer for a new note
+
+    pusha  ; Preserve registers
+    shr     ax, 2  ; Shorten the timer time based on note length
+
+    cmp     [bx]8, 1   ; If there was no dot at the note, skip subtracting 1/3 of note length
+    jne     if_no_dot
+
+    push    dx   ; Preserve registers
+    xor     dx, dx ; Zeroing
+    push    bx
+    mov     bx, ax
+    mov     cx, 3
+    div     cx  ; Division (corrected)
+
+    shr     cx, 1 ; Rounding
+    cmp     cx, dx
+    jge     do_not_round_1
+    inc     ax
+    do_not_round_1:
+    sub     bx, ax ; Add to the normal note duration length
+    mov     ax, bx
+    pop     bx
+    pop     dx
+
+if_no_dot:
+    push    dx
+    push    bx
+    mov     bx, dx
+    xor     dx, dx  ; Zeroing
+    mov     cl, [bx]0
+    mov     ch, [bx]1
+    mul     cx
+    pop     bx
+
+    mov     cl, [bx]0
+    mov     ch, [bx]1
+    xor     dx, dx  ; Zeroing
+    mul     cx
+    pop     bx
+    mov     [di], ax  ; Write the result to di
+    cmp     ax, 0
+    je      set_timer_0   ; If setting timer to zero must be popa
+    popa
+new_note:
+    push    dx
+    xor     dx, dx   ; Zeroing
+    mov     al, [di]0
+    mov     ah, [di]1
+    mov     cl, [si]4
+    mov     ch, [si]5  ; Read the beat and note duration
+
+    pop     dx
+    cmp     ax, 32768
+    jns     div_ok_1
+    cmp     ax, cx
+    jl      set_timer_0_no_popa  ; Protection against division error
+div_ok_1:
+    push    dx
+    xor     dx, dx   ; Zeroing
+    div     cx  ;Division (corrected)
+    shr     cx, 1  ; Rounding
+    cmp     cx, dx
+    jge     do_not_round_2
+    inc     ax
+    do_not_round_2:
+
+    xor     dx, dx   ; Zeroing
+    sal     ax, 2
+    pop     dx
+
+    push    di  ; Enter the beat value that programmed the timer
+    mov     di, dx
+    mov     [di], cx
+    pop     di
+    xor     dx, dx   ; Zeroing
+
+; Procedure Chk_for_modifiers
+; Description:
+;   This procedure checks the keyboard buffer for modifiers, such as changing the beat or the octave modifier.
+Chk_for_modifiers proc near
+    pusha ; Preserve registers
+
+    mov     ax, 0100h
+    int     16h  ; Interrupt 16h, service 01h checks the keyboard buffer and sets the zero flag if the buffer is empty, but does not remove the character
+    jz      nothing_in_buffer
+
+    cmp     al, '+'  ; If "+" is in the buffer, increase beat; if "-", decrease beat
+    je      inc_beat
+    cmp     al, '-'
+    je      dec_beat
+
+    jmp     no_modifier
+
+ctrl_pressed:
+    cmp     al, '.'  ; If "." is in the buffer, increase octave; if ",", decrease octave
+    je      inc_oct
+    cmp     al, ','
+    je      dec_oct
+    jmp     no_modifier
+
+inc_beat:
+    push    si
+    add     si, 4
+    lodsw   ; Load the current beat value from memory
+    pop     si
+
+    cmp     ax, 896 ; Check if it's greater than 896 (change by 5, 895 + 5 = 900 is a valid value, 896 + 5 = 901 is an error)
+    jge     no_modifier   ; Jump if no change was made
+
+    add     ax, 5   ; Add 5 to the beat value and store in memory
+    mov     [si]4, al
+    mov     [si]5, ah
+    jmp     beat_modified  ; Jump if value changed
+
+dec_beat:
+    push    si
+    add     si, 4
+    lodsw
+    pop     si ; Load the current beat value from memory
+
+    cmp     ax, 29  ; Check if it's less than 29 (change by 5, 30 - 5 = 25 is a valid value, 29 - 5 = 24 is an error)
+    jle     no_modifier ; Jump if no change was made
+    sub     ax, 5   ; Subtract 5 from the beat value and store in memory
+    mov     [si]4, al
+    mov     [si]5, ah
+    jmp     beat_modified   ; Jump if value changed
+
+inc_oct:
+    push    si
+    mov     si, di
+    lodsw   ; Load the octave modifier from memory
+    pop     si
+
+    cmp     ah, 10000000b  ; Check if it's negative
+    je      subtract_1_from_oct   ; If so, subtract 1 from octave
+    jmp     add_1_to_oct  ; Otherwise, add 1 to octave
+
+
+dec_oct:
+    push    si
+    mov     si, di
+    lodsw  ; Load the octave modifier from memory
+    pop     si
+
+    cmp     ah, 10000000b  ; Check if it's negative
+    je      add_1_to_oct ; If so, add 1 to octave
+    jmp     subtract_1_from_oct   ; Otherwise, subtract 1 from octave
+
+add_1_to_oct:
+    cmp     al, 4  ; Maximum octave modifier in my version of the program is -4 or +4; if trying to add 1 when it's already 4, do not change it
+    jge     no_modifier
+    inc     [di]  ; Increase the modifier by 1
+    jmp     oct_modified ; Jump if octave modifier changed
+
+subtract_1_from_oct:
+    cmp     al, 0 ; If the modifier is 0 and we're trying to subtract, set modifier to -1
+    je      set_neg_1_oct
+
+    cmp     ah, 10000000b  ; If the modifier is positive, subtract 1
+    jne     sub_1_pos
+    cmp     al, 1  ; If the modifier is negative and is -1, set the modifier to 0 (to avoid a situation where the modifier is -0)
+    je      set_oct_zero
+
+sub_1_pos:
+    dec     [di]
+    jmp     oct_modified  ; Jump if the octave modifier was changed
+
+set_oct_zero:
+    mov     [di], 0
+    mov     [di]1, 0  ; Set the octave modifier to 0
+    jmp     oct_modified   ; Jump if the octave modifier was changed
+
+set_neg_1_oct:
+    mov     [di]1, 10000000b
+    mov     [di], 1  ; Set the octave modifier to -1
+    jmp     oct_modified  ; Jump if the octave modifier was changed
+
+no_modifier:
+    mov     [bx], 0 ; Set the flag indicating whether the beat or octave modifier was changed
+    mov     [bx]1, 0
+    jmp     modifiers_read   ; End the function if there's something in the keyboard buffer
+
+beat_modified:
+    mov     [bx]1, 1  ; Set the flag indicating that the beat was changed
+    jmp     modifiers_read ; End the function if there's something in the keyboard buffer
+
+oct_modified:
+    mov     [bx], 1  ; Set the flag indicating that the octave modifier was changed
+
+modifiers_read:   ; Read the character from the keyboard buffer (int 16h service 00h removes the character from the buffer after reading)
+    mov     ax, 0000h
+    int     16h
+
+nothing_in_buffer:
+    popa ; Restore registers
+    ret
+Chk_for_modifiers endp
+
+; Procedure Get_cmd_params
+; Description:
+;   This procedure is responsible for reading the parameters passed in the command line.
+;   These parameters may concern length, octave, or beat.
+Get_cmd_params proc near
+    push    di
+    push    cx
+    push    si
+    push    si  ; Save registers
+
+    ; Initialize buffers and variables
+    lea     si, is_param_read
+    mov     cx, 6
+    call    zero_buffer
+    lea     si, aux_buf
+    mov     cx, 4
+    call    zero_buffer
+
+    pop     si
+    mov     index2, 0
+    mov     index2[1], 0 ; Initialize variables and buffers
+    mov     si, 80h          ; Offset of parameters in the command line
+    xor     cx, cx            ; Clear cx register
+    mov     cl, es:[si]      ; Get the size of the command line
+
+    cmp     cx, 0             ; Are there any characters > 0?
+    jz      no_param           ; If not, skip copying.
+
+ignore_leading_spaces:
+    inc     si                 ; Start reading from the second byte
+    cmp     es:[si], 13       ; If carriage return (13) is read, end parameters
+    je      no_param           ; End the procedure
+
+    push    di                   ; Check if it's a white space
+    lea     di, con
+    call    chk_if_whitespace_es
+    pop     di
+
+    cmp     con, 1             ; If a non-white space character is read, continue reading the filename with notes
+    je      ignore_leading_spaces
+
+    dec     si                ; Decrement si by one byte (necessary because the next loop first increments si and then checks the content of es:[si])
+    dec     di                ; Similarly for di, it needs to be decremented by one
+
+
+next_char:
+    inc     di
+    inc     si
+    cmp     es:[si], 13        ; If carriage return (13) is read, end reading default parameters
+    je      read_default_params_cmd
+    push    di                ; Check if it's a white space
+    lea     di, con
+    call    chk_if_whitespace_es
+    pop     di
+    cmp     con, 1
+    je      read_default_params_cmd
+    mov     al, es:[si]        ; If a non-white space character is read, add that character from es:[si] to ds:[di]
+    mov     [di], al
+    jmp     next_char
+
+read_default_params_cmd:
+    ; Set 0 at the end of the buffer:
+    mov     byte ptr [di], 0  ; Add zero at the end of the filename
+    cmp     es:[si], 13      ; If carriage return (13) or spaces are read, it's okay, otherwise, it's an invalid parameter
+    je      no_param
+    pop     di                ; In di, the address of the beginning of the default parameters
+    push    di                   ; Save the number of elements on the stack
+
+
+read_default_params_cmd_loop:
+    inc     si               ; Increment si - next character
+    cmp     es:[si], 13       ; If carriage return (13) is read, end reading parameters
+    je      no_param
+    push    di                ; Check if it's a white space
+    lea     di, con
+    call    chk_if_whitespace_es
+    pop     di
+    cmp     con, 1
+    je      read_default_params_cmd_loop
+    cmp     es:[si], 65      ; If the character is below ASCII code 'A', it's an invalid parameter
+    jle     wrong_params
+    cmp     es:[si], 122      ; If the character is above ASCII code 'z', it's an invalid parameter
+    jg      wrong_params
+    or      es:[si], 00100000b ; Convert ASCII code to lowercase
+    cmp     es:[si], 'd'       ; Did we read 'd'? If yes, set index2 to 0 and read the number, but don't check if anything was read
+    jne     chk_cmd_o
+    mov     index2, 0
+    jmp     read_number_cmd
+chk_cmd_o:
+    ; Same as for 'd', but index2 = 2
+    cmp     es:[si], 'o'
+    jne     chk_cmd_b
+    mov     index2, 2
+    jmp     read_number_cmd
+chk_cmd_b:
+    ; Same, but index2 = 4, if not, it's an invalid parameter
+    cmp     es:[si], 'b'
+    jne     wrong_params
+    mov     index2, 4
+
+read_number_cmd:
+    lea     di, aux_buf         ; di points to the beginning of aux_buf
+    mov     counter, 0          ; Clear the counter for the number of digits read
+
+read_number_cmd_loop:
+    inc     si                 ; Increment si - next character
+    cmp     es:[si], 48        ; If it's not a digit, end reading the parameter value
+    jl      end_read_number_cmd
+    cmp     es:[si], 57           ; If it's not a digit, end reading the parameter value
+    jg      end_read_number_cmd
+    mov     al, es:[si]
+    mov     [di], al             ; Add the read character to the buffer
+    inc     counter           ; Increment the counter for the number of read digits
+    inc     di                 ; Increment di - next byte in aux_buf
+    jmp     read_number_cmd_loop  ; Repeat reading
+
+end_read_number_cmd:
+    cmp     es:[si], 13         ; If carriage return (13) is read, or spaces, it's OK, otherwise, it's an invalid parameter
+    je      process_param_cmd
+    cmp     es:[si], 32
+    je      process_param_cmd
+    jmp     wrong_params
+
+process_param_cmd:
+    dec     si
+    push    di
+    push    si
+    lea     si, aux_buf
+    lea     di, d_val_to_chk
+    mov     cx, counter
+    mov     dx, 10
+    call    Parse
+    pop     si
+    pop     di
+
+    push    si
+
+    cmp     index2, 4   ; The value of index2 indicates what was read: 0 = length, 2 = octave, 4 = beat.
+    jne     not_beat_cmd
+    cmp     d_val_to_chk, 25  ; Check if the read beat value falls within the range of 25 - 900, otherwise, it's invalid parameters
+    jl      wrong_params
+    cmp     d_val_to_chk, 900
+    jg      wrong_params
+    jmp     over_default_cmd
+
+not_beat_cmd:
+    push    di
+    lea     bx, index_of_n  ; Address of the start of the variable holding the index.
+    lea     si, d_val_to_chk   ; Address of the start of the value to check.
+
+    cmp     index2, 2
+    je      index2_eq_dur  ; Load either the duration vector or the octave vector into di, depending on the value of the index2 variable.
+    lea     di, vect_no_dur  ; Address of the start of the duration vector (values in the vector = 8 bits).
+    mov     cx, 6  ; Length of the vector.
+    jmp     after_index2_eq_if
+
+index2_eq_dur:
+    lea     di, vect_no_oct  ; Load the address of the octave vector if index2 = 2.
+    mov     cx, 4  ; Length of the vector.
+
+after_index2_eq_if:
+
+    call    chk_if_in_range   ; Check if the value is within the vector.
+    pop     di
+    cmp     index_of_n, 10000001b ; index_of_n = -1, the value was not in the vector, invalid parameter.
+    je      wrong_params
+
+over_default_cmd:
+    pop     si
+    pop     di
+    push    di
+    lea     di, is_param_read ; Variable holding data about whether the parameter has already been read.
+    add     di, index2   ; Offset of the state of reading the currently overwritten parameter.
+    cmp     di, 1  ; If the parameter has already been read, it's an invalid parameter.
+    je      wrong_params
+    pop     di
+    push    di
+    push    di
+    add     di, index2  ; Write the read value to the appropriate place in the variable holding default values.
+    push    ax
+    mov     ax, d_val_to_chk
+    mov     [di], ax
+    pop     ax
+    lea     di, is_param_read   ; Set the parameter read flag for the appropriate parameter.
+    add     di, index2
+    mov     di, 1
+    pop     di
+    jmp     read_default_params_cmd_loop   ; Repeat reading parameters from the console.
+
+wrong_params:
+    lea     si, err1
+    call    Write_string_DOS  ; Display error message and terminate program execution.
+    jmp     EO_file_no_cls   ; Jump to label EO_file_no_cls.
+
+no_param:
+    pop     si
+    pop     cx
+    pop     di
+    ret
+
+Get_cmd_params endp
+
+; Procedure Open_file
+; Description:
+;   The procedure opens a file with the given name in read-only mode and saves the file handle in the variable at DS:[DI].
+Open_file proc near
+    push    ax
+    xor     al, al              ; Access mode: inherited, compatibility mode, read-only (00000000b).
+    mov     ah, 3Dh             ; DOS service to open a file.
+    int     21h
+    jc      Cannot_open_file    ; If the carry flag is set, the file failed to open. Jump to error handling.
+    mov     ds:[di], ax         ; Save the file handle in the variable whose address is in DS:[DI].
+    pop     ax
+    ret
+
+Cannot_open_file:
+    lea     si, err2
+    call    Write_string_dos   ; Display error message and terminate program.
+    jmp     EO_file_no_cls        ; Jump to label EO_file_no_cls.
+Open_file endp
+
+; Procedure Read_header
+; Description:
+;   The procedure responsible for reading the header from the file.
+Read_header proc near
+    pusha
+    lea     dx, char           ; DX points to the beginning of the buffer where the character will be loaded (char - "local variable").
+    mov     counter, 0          ; Initialize character counter in the buffer.	
+
+read_char_title:
+    mov     ah, 3Fh             ; DOS service to read from a file.
+    mov     cx, 1               ; Number of bytes to read from the file (1 byte = 1 ASCII character).
+    int     21h
+    cmp     al, 0               ; If the number of characters read is zero, it indicates the end of the file.
+    je      EO_file             ; End reading the file.
+    cmp     char, 58            ; If ':' is read, end reading the title section.
+    je      EO_title_segment    ; End reading the title section.
+
+    push    si
+    push    di
+    lea     si, char
+    lea     di, con
+    call    Chk_if_whitespace ; Check if it's a whitespace character.
+    pop     di
+    pop     si
+    cmp     con, 1              ; If a non-whitespace character is read, continue reading title characters.
+    je      read_char_title
+
+    mov     al, char
+    mov     [si], al            ; Store the read character at the address pointed to by SI.
+    inc     si                  ; Increment SI by one (points to the next byte).
+    inc     counter             ; Increment the character count.
+    jmp     read_char_title     ; Repeat reading characters.
+
+EO_title_segment:
+    mov     [si], 0              ; Add the string terminator in the title buffer.
+
+    mov     index, 0            ; Pointer indicating which value is currently being read (index as a "local variable").
+
+read_char_params:
+    mov     ah, 3Fh             ; DOS service to read from a file.
+    mov     cx, 1               ; Number of bytes to read from the file (1 byte = 1 ASCII character).
+    int     21h
+    cmp     al, 0               ; If the number of characters read is zero, it indicates the end of the file.
+    je      EO_file             ; End reading the file.
+
+read_char_params_no_read:
+    push    si
+    push    di
+    lea     si, char
+    lea     di, con
+    call    Chk_if_whitespace  ; Check if it's a whitespace character.
+    pop     di
+    pop     si
+    cmp     con, 1               ; If a non-whitespace character is read, continue reading characters.
+    je      read_char_params
+
+    cmp     char, 'd'          ; If 'd' is read, set index to 0.
+    jne     check_if_o
+    mov     index, 0
+    jmp     check_if_equal
+
+check_if_o:
+    cmp     char, 'o'           ; If 'o' is read, set index to 2.
+    jne     check_if_b
+    mov     index, 2
+    jmp     check_if_equal
+
+check_if_b:
+    cmp     char, 'b'            ; If 'b' is read, set index to 4.
+    jne     check_if_other
+    mov     index, 4
+
+check_if_equal:
+    mov     ah, 3Fh             ; DOS service to read from a file.
+    mov     cx, 1            ; Number of bytes to read from the file (1 byte = 1 ASCII character).
+    int     21h
+    cmp     char, '='              ; If '=' is read, continue reading the value.
+    je      read_val
+
+    push    si
+    push    di
+    lea     si, char
+    lea     di, con
+    call    Chk_if_whitespace   ; Check if it's a whitespace character.
+    pop     di
+    pop     si
+    cmp     con, 1               ; If it's neither whitespace nor '=', start reading parameters again.
+    je      check_if_equal
+    jmp     read_char_params_no_read  ; If it's neither whitespace nor '=', start looking for parameters again.
+
+check_if_other:
+    cmp     char, ':'            ; If ':' is read, end reading the parameter section.
+    je      EO_params_segment
+    jmp     read_char_params
+
+read_val:
+    lea     si, aux_buf         ; Buffer to temporarily store the read value (also a "local variable", only exists for the purpose of this function).
+    push    cx
+    mov     cx, 4
+    call    zero_bufor
+    pop     cx
+    mov     counter, 0
+
+read_val_loop:
+    mov     ah, 3Fh              ; DOS service to read from a file.
+    mov     cx, 1                  ; Number of bytes to read from the file (1 byte = 1 ASCII character).
+    int     21h
+    cmp     al, 0              ; If the number of characters read is zero, it indicates the end of the file.
+    je      EO_file
+
+    cmp     char, ','           ; If ',' is read, end reading the value.
+    je      EO_value
+    cmp     char, ':'           ; If ':' is read, end reading the value.
+    je      EO_value
+
+; Procedure Parse
+; Description:
+;   The procedure parses a string representing a number in a given base and converts it to an integer.
+;   The result is stored in the variable at DS:[DI].
+; Parameters:
+;   DI - pointer to the variable where the result will be stored as an integer (2 bytes).
+;   SI - pointer to the string to be parsed.
+;   DX - the base of the number system in which the number is represented (e.g., 10 for decimal).
+;   CX - number of characters to parse (number of digits).
+; Registers:
+;   AX, BX - used as temporary variables.
+;   DX - used as the base of the number system.
+;   SI, DI - used as pointers to data.
+;   CX - used as a counter for the number of digits to parse.
+;   Flags - set by conditional instructions inside the loop.
+Parse proc near
+    push    di
+    push    si                       ; Save register values.
+    push    ax
+    push    cx
+    push    dx
+
+    mov     cnt_sys_base, dx       ; Save the base of the system in a global variable.
+
+    add     si, cx               ; Set the pointer to the last non-terminating character in the string.
+    dec     si
+
+    std                              ; Set the direction flag to 1 to make LODSB decrement SI (reading the string from the end).
+    mov     multiplier, 1            ; Set the multiplier to 1.
+    mov     ds:[di], 0               ; Clear the variable where we write the result (2-byte variable).
+    mov     ds:[di+1], 0            ; Clear the second byte of the variable.
+
+parse_char:
+    mov     ax, 0                   ; Clear the AX register.
+    lodsb                           ; Load a byte of data from DS:SI into AL.
+    cmp     ax, 57                   ; Check if it's a digit or a letter (if the ASCII character is greater than '9').
+    jg      parse_l                  ; If it's a letter, jump to parse the letter.
+    sub     ax, '0'                 ; Subtract 48 to get the digit value (if it was a digit).
+    jmp     after_parse_l           ; Skip parsing the letter.
+
+parse_l:
+    sub     ax, '7'                 ; Subtract 55 to get the letter value (if it was a letter).
+
+after_parse_l:
+    mul     multiplier              ; Multiply the value read from the character by the multiplier (power of 10).
+    add     ds:[di], ax             ; Add the obtained value to the result variable.
+
+    push    ax
+    push    dx
+    mov     ax, multiplier          ; Multiply the multiplier by 10 (get the next power).
+    mul     cnt_sys_base            ; Base of the system in which the number to be parsed is represented.
+    mov     multiplier, ax
+    pop     dx
+    pop     ax
+
+    loop    parse_char              ; Repeat as many times as characters were entered.
+
+    pop     dx
+    pop     cx                      ; Restore register values.
+    pop     ax
+    pop     si
+    pop     di
+    ret
+Parse endp
+
+    	end_read_v:
+	
+    pop         di                      ; Store the value of register di on the stack
+    mov         al, note_dur_read       ; Store the value of note_dur_read in the register al
+    mov         [di], al                ; Assign the value of register al to the element at ds:[di], note_dur_read
+    inc         di                      ; Increment di by 1
+    mov         al, note_oct_read       ; Store the value of note_oct_read in the register al
+	mov         [di], al                ;przypisz rejestr al do elementu o adresie ds:[di], note_oct_read
+	inc         di                      ;zwieksz di o 1
+	mov         al, 0                   ;wrzuc zero do al
+	mov         [di], al                ;przypisz rejestr al do elementu o adresie ds:[di]
+	inc         di                      ;zwieksz di o 1
+	mov         al, 0                   ;wrzuc zero do al
+	mov         [di], al                ;przypisz rejestr al do elementu o adresie ds:[di]
+	inc         di                      ;zwieksz di o 1
+	mov         al, 0                   ;wrzuc zero do al
+	mov         [di], al                ;przypisz rejestr al do elementu o adresie ds:[di]
+	inc         di                      ;zwieksz di o 1
+	mov         al, 0                   ;wrzuc zero do al
+	mov         [di], al                ;przypisz rejestr al do elementu o adresie ds:[di]
+	pop         di                      ;przywroc di ze stosu
+	jmp         read_char_note
+
+	cnt_read:
+	
+
+
+    cmp         counter, 0              ; Check if any digits were read.
+    jz          read_char_note          ; If not, mark it as '0' and move to read the next character.
+    lea         dx, aux_buf             ; Load the address of the auxiliary buffer where the read digits are stored.
+    lea         si, char                ; Load the address of the buffer where we'll load the character.
+    call        Parse                   ; Parse the string of digits into an integer, result in ax.
+    pop         ax                      ; Clear stack from ax.
+    pop         si                      ; Clear stack from si.
+    pop         di                      ; Clear stack from di.
+    mov         note_dur_read, ax       ; Store the parsing result in the variable note_dur_read.
+    jmp         read_char_note          ; Jump back to reading characters.
+	EO_note_last:
+	popa                                 ; Restore all values from the stack.
+	ret
+Read_note endp
+
+	
+		cnt_read:
+	cmp         note_dur_read, 1        ; Check if the duration has not been previously read or set to default. If so, set it to default, otherwise continue checking further.sprawdzanie dalej.
+	je          cnt_read_2
+	jmp         end_read_v
+
+	cnt_read_2:
+	cmp         char, '#'               ; If the '#' character is read, set the hash flag for the note.
+	je          set_hash_flag
+	cmp         char, '.'
+	je          set_dot_flag             ; If the '.' character is read, set the dot flag for the note.
+	cmp         char, ','
+	je          EO_note                  ; If the ',' character is read, it's the end of reading the note.
+
+	read_pitch:
+    cmp         char, 'b'               ; If 'b' is read, replace it with 'h' (difference in notation between EU and NA).
+    jne         after_switch_b          ; If not, jump to after_switch_b label.
+	mov         char, 'h'
+	after_switch_b:
+	or          char, 00100000b         ; Convert to lowercase.
+	push        di
+	push        bx
+	push        si
+    lea         bx, index_of_n          ; Address of the variable where the found or not found index will be stored.
+    lea         si, char                ; Address of the value to be searched in the vector.
+    lea         di, vect_no_inx         ; Vector containing pitch designations.
+    mov         cx, 8                   ; Length of the vector.
+    call        chk_if_in_rng           ; Store the index found in the pitch vector at the address in bx.
+	pop         si
+	pop         bx
+	pop         di
+	cmp         index_of_n, 10000001b  ; Is the index -1? If so, the read value was not found in the pitch vector, therefore repeat reading the note.
+	je          read_char_note
+    xor         ah, ah                  ; Clear the ah register.
+    mov         al, char                ; Technical move from the address in memory to another address in memory, hence the value must be passed through a register.
+	mov         [di]2, ax               ; Write the found value to the note data variable.
+	jmp         read_char_note              ; Repeat note character reading.
+
+	EO_note_last:
+	mov         ds:[bp], 1            ; Set the end-of-file flag for the last note at ds:bp.
+
+	EO_note:
+	cmp         note_oct_read, 0       ; If the octave hasn't been read yet, proceed to read the value.
+	je          end_read_v
+
+	popa
+	ret
+
+	set_hash_flag:
+	mov         [di]6, 1                 ; If '#' character is read, set the hash flag in the note data variable.
+	jmp         read_char_note
+
+	set_dot_flag:
+	mov         [di]8, 1                ; If '.' character is read, set the dot flag in the note data variable.
+	jmp         read_char_note
+
+	end_read_v:
+
+    cmp         counter, 0              ; Counter stores the number of digits read. If it's 0, paste default value.
+    je          paste_default_v
+    push        si                      ; Save register values on the stack.
+    push        di
+    lea         si, aux_buf             ; si holds the address of the buffer containing the string representing a number (terminated by zero).
+    lea         di, d_val_to_chk        ; di holds the address where the value represented by this string should appear.
+    mov         cx, counter             ; Number of digits in the string.
+    mov         dx, 10                  ; Base of the system in which the number represented by the string is stored.
+    call        Parse                   ; Parse the string of digits into an integer, result in ax.
+    pop         di                      ; Restore values from the stack.
+	pop         si
+
+	push        si                        ; Save register values on the stack.
+	push        di
+	push        bx
+    lea         bx, index_of_n          ; Address of the variable where the found or not found index will be stored.
+    lea         si, d_val_to_chk        ; Address of the value we are searching for in the vector.
+	
+	cmp         note_dur_read, 1        ; Check if the note duration has been read already. If so, load the address of the octave vector, otherwise load the address of the duration vector.
+	je          if_dur_read
+    lea         di, vect_no_dur         ; Vector where we are searching for the value.
+    mov         cx, 6                   ; Length of the vector.
+    jmp         after_if_dur_read       ; Jump to after_if_dur_read label, skipping the address setting in di.
+	               
+	if_dur_read:
+    lea         di, vect_no_oct         ; Vector where we are searching for the value.
+    mov         cx, 4                   ; Length of the vector.
+	
+	after_if_dur_read:
+		call        chk_if_in_rng           ; Check if the value is in the vector.
+	pop         bx
+	pop         di
+	pop         si
+	cmp         index_of_n, 10000001b  ; Check if the returned index is -1. If so, there was no value in the vector, hence repeat reading the note.
+	je          paste_default_v
+	push        ax                        ; Save ax on the stack.
+	mov         ax, d_val_to_chk         ; ax holds the value to be stored in the note data variable.
+	
+	cmp         note_dur_read, 1       ; If the duration has already been read, store the value as an octave, otherwise as a duration.
+	je          paste_octave_if
+	mov         [di], ax                ; Write the duration.
+	mov         note_dur_read, 1         ; Set the flag indicating that the duration has been read.
+	jmp         after_paste_octave_if  ; Skip writing the octave.
+	paste_octave_if:
+	mov         [di]4,ax                 ; Write the octave.
+	mov         note_oct_read, 1       ; Set the flag indicating that the octave has been read.	
+	after_paste_octave_if:
+	pop         ax                       ; Restore ax.
+	jmp         cnt_read_2              ; Return to the loop checking the read characters.
+
+	paste_default_v:
+	cmp         note_dur_read, 1        ; If the duration has not been read yet, write the default octave. Otherwise, write the default duration.
+	je          paste_default_octave_if
+	mov         ax, [si]                 ; Write the default duration to the note data variable.
+	mov         [di], ax
+	mov         note_dur_read, 1        ; Set the flag indicating that the duration has been read.
+	jmp         after_paste_default_octave_if
+	paste_default_octave_if:
+	mov         ax, [si]2               ; Write the default octave to the note data variable.
+	mov         [di]4, ax
+	mov         note_oct_read, 1        ; Set the flag indicating that the octave has been read.
+	after_paste_default_octave_if:
+	jmp         cnt_read_2              ; Return to the loop checking the read characters.
+
+Read_note endp
+
+
+Chk_if_in_rng proc near              ; Procedure to check if a value is in the vector. 
+	push        cx
+	push        di
+	push        si
+	push        bx                         ; Save register values on the stack before calling the function.
+	mov         index, 0                   ; Reset the index variable (used only within the function).
+	mov         bx, [si]                   ; Load the value from ds:si into bx.
+	chk_if_in_rng_loop:
+	cmp         bl, [di]                  ; Is the value in bl equal to the value in ds:di?
+	je          ret_true                   ; If yes, return the index of that value in the vector.
+	inc         di                          ; Increment the index.
+	inc         index                       ; Increment the index.
+	cmp         index, cx                   ; Check if the index is greater than the length of the value vector.
+	jge         ret_false                   ; If yes, the sought value is not in the vector, so return -1 in the index variable.
+	jmp         chk_if_in_rng_loop         ; Repeat the check.
+	ret_true:
+	pop         bx                          ; Load from the stack to bx (the address where the found index should appear).
+	push        ax                        ; Save ax on the stack.
+	mov         ax, [index]                 ; Pass the value of the index variable through the ax register to the address pointed to by ds:bx.
+	mov         [bx], ax
+	pop         ax                          ; Restore registers.
+	pop         si
+	pop         di
+	pop         cx
+	ret
+	ret_false:  
+	pop         bx                             ; Load from the stack to bx (the address where we return the index).
+	mov         [bx], 10000001b            ; Value not found in the vector, so return -1 as the modulo sign code.
+	pop         si                           ; Restore registers.
+	pop         di
+	pop         cx
+	ret
+Chk_if_in_rng   endp
+
+
+Zero_bufor      proc    near                ; Procedure to zero out a buffer.
+	push        cx                          ; Save register values on the stack before calling the function.
+	push        si
+	zero_bufor_loop:
+	mov         [si], 0                      ; Write 0 to ds:si.
+	inc         si                         ; Increment si by 1.
+	loop        zero_bufor_loop             ; Repeat cx times.
+	pop         si                              ; Restore registers.
+	pop         cx
+	ret
+Zero_bufor      endp
+
+Chk_if_whitespc proc    near                 ; Procedure to check if a character is whitespace.
+    push        si
+    push        di                           ; Save register values on the stack before calling the function.
+    cmp         [si], 0Ah                    ; Compare if the character in ds:si is newline, return 1 if true.
+	je          ret_true_wht_spc
+	cmp         [si], 0Dh                   ; Compare if the character in ds:si is carriage return, return 1 if true.
+	je          ret_true_wht_spc
+	cmp         [si], 09h                   ; Compare if the character in ds:si is tab, return 1 if true.
+	je          ret_true_wht_spc
+	cmp         [si], 020h                  ; Compare if the character in ds:si is space, return 1 if true.
+	je          ret_true_wht_spc
+	mov         [di], 0                     ; Return 0.
+	pop         di                          ; Restore registers.
+	pop         si
+	ret
+    ret_true_wht_spc:   
+	
+	mov         [di], 1                     ; Return 1.
+	pop         di                          ; Restore registers.
+	pop         si
+	ret        
+Chk_if_whitespc endp
+
+Chk_if_whitespc_es proc    near             ; Procedure to check if a character is whitespace using ES:SI.
+    push        si
+    push        di                           ; Save register values on the stack before calling the function.
+    cmp         es:[si], 0Ah                ; Compare if the character in ES:SI is newline, return 1 if true.
+	je          ret_true_wht_spc_es
+	cmp         es:[si], 0Dh                ; Compare if the character in ES:SI is carriage return, return 1 if true.
+	je          ret_true_wht_spc_es
+	cmp         es:[si], 09h                ; Compare if the character in ES:SI is tab, return 1 if true.
+	je          ret_true_wht_spc_es
+	cmp         es:[si], 020h               ; Compare if the character in ES:SI is space, return 1 if true.
+	je          ret_true_wht_spc_es
+	mov         [di], 0                      ; Return 0.
+	pop         di                          ; Restore registers.
+	pop         si
+	ret
+    ret_true_wht_spc_es:   
+	
+	mov         [di], 1                       ; Return 1.
+	pop         di                           ; Restore registers.
+	pop         si
+	ret        
+Chk_if_whitespc_es endp
+
+_code ends
+
+_data segment
+    last_note   db 0
+   
+    color       db ?
+    is_it_time  db 0
+    err1        db "Wrong parameters", 0
+    err2        db "File cannot be opened", 0
+    aux_buf     db 4 dup(0)
+	filename	db 512 dup(0)
+	song_name   db 255 dup(0)
+	char		db ?
+	filehandle	dw ?
+	default_params  dw  4, 6, 63
+	multiplier  dw ?
+	counter     dw ?
+	index       dw ?
+	index2      dw ?
+	index_of_n  dw ?
+	con         db ?
+	timer       dw ?
+	last_beat   dw ?	
+	was_modified_o_b db 0, 0
+	octave_modifier dw 0
+	is_param_read dw 3 dup(?)
+	note_dur_read db ?
+	note_oct_read db ?
+	d_val_to_chk dw ?
+	cnt_sys_base dw ?
+	note_d_p_o_h_d dw 0, 0, 0, 0, 0
+	vect_no_oct db 4, 5, 6, 7
+	vect_no_dur db	1, 2, 4, 8, 16, 32
+	vect_no_inx db  'c', 'd', 'e', 'f', 'g', 'a', 'h', 'p'
+	vect_no_freq_oct_0 db 16, 18, 21, 22, 25, 28, 31, 0
+	 ; Next octaves are 2 times the frequency of the previous
+	
+	vect_no_freq_h_oct_0 db 17, 19, 0, 23, 26, 29
+
+_data ends
+
+_stack segment stack
+	dw	100h dup(?)
+_stack ends
+
+end start
